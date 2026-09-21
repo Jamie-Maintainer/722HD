@@ -42,7 +42,9 @@ jobs:
 
       - name: Validate Kubernetes manifests
         run: |
-          kubectl apply --dry-run=client --validate=false -f kubernetes/
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform
+          ./kubeconform -summary -strict kubernetes/
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
