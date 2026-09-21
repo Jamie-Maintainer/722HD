@@ -1,0 +1,16 @@
+services:
+  frontend:
+    platform: linux/amd64
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: koalatech-frontend:v1
+    container_name: koalatech-frontend
+    ports:
+      - "3000:80"
+    networks:
+      - koalatech-network
+
+networks:
+  koalatech-network:
+    driver: bridge

@@ -1,0 +1,223 @@
+name: 02 - Blue/Green Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag to build and deploy"
+        required: true
+        type: string
+      target_env:
+        description: "Blue/Green environment to deploy"
+        required: true
+        type: choice
+        options:
+          - blue
+          - green
+      switch_production:
+        description: "Switch production traffic after internal smoke tests pass"
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: production-blue-green
+  cancel-in-progress: false
+
+jobs:
+  blue-green-deploy:
+    name: Deploy ${{ inputs.target_env }}
+    runs-on: ubuntu-latest
+
+    environment:
+      name: production
+
+    env:
+      TARGET_ENV: ${{ inputs.target_env }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      NAMESPACE: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v3
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to Azure Container Registry
+        run: |
+          az acr login --name ${{ vars.ACR_NAME }}
+
+      - name: Build image
+        run: |
+          IMAGE="${{ vars.ACR_LOGIN_SERVER }}/koalatech-frontend:${IMAGE_TAG}"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
+          docker build \
+            --platform linux/amd64 \
+            -t "${IMAGE}" \
+            ./frontend
+
+      - name: Push image to ACR
+        run: |
+          docker push "${IMAGE}"
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - name: Deploy to target environment
+        run: |
+          kubectl apply -f kubernetes/namespace.yaml
+
+          sed "s|image: nginx:1.27-alpine|image: ${IMAGE}|" \
+            "kubernetes/frontend-${TARGET_ENV}.yaml" \
+            | kubectl apply -f -
+
+          kubectl rollout status \
+            "deployment/frontend-${TARGET_ENV}" \
+            -n "${NAMESPACE}" \
+            --timeout=300s
+
+          kubectl get pods -n "${NAMESPACE}" -l "app=frontend,slot=${TARGET_ENV}"
+
+      - name: Internal smoke test
+        run: |
+          SERVICE="frontend-${TARGET_ENV}"
+          JOB="smoke-${TARGET_ENV}-${{ github.run_id }}"
+
+          kubectl delete job "${JOB}" -n "${NAMESPACE}" --ignore-not-found
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB}
+            namespace: ${NAMESPACE}
+          spec:
+            backoffLimit: 4
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: curl
+                    image: alpine:3.21
+                    command:
+                      - /bin/sh
+                      - -c
+                      - |
+                        set -e
+                        apk add --no-cache curl >/dev/null
+                        URL="http://${SERVICE}.${NAMESPACE}.svc.cluster.local/"
+                        echo "Internal smoke test: \${URL}"
+                        BODY=\$(curl -sf --retry 12 --retry-delay 5 --retry-all-errors "\${URL}")
+                        echo "\$BODY" | grep -q "KoalaTech University"
+                        echo "Internal smoke test passed"
+          EOF
+
+          if ! kubectl wait --for=condition=complete "job/${JOB}" -n "${NAMESPACE}" --timeout=180s; then
+            kubectl logs "job/${JOB}" -n "${NAMESPACE}" || true
+            kubectl describe "job/${JOB}" -n "${NAMESPACE}" || true
+            exit 1
+          fi
+
+          kubectl logs "job/${JOB}" -n "${NAMESPACE}"
+
+      - name: Decide whether production traffic should switch
+        id: decide
+        run: |
+          if [ "${{ inputs.switch_production }}" = "true" ]; then
+            echo "Internal smoke test passed. Production traffic will switch to ${TARGET_ENV}."
+            echo "switch=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Internal smoke test passed. Production traffic will not be switched."
+            echo "switch=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Switch traffic
+        id: switch
+        if: steps.decide.outputs.switch == 'true'
+        run: |
+          if kubectl get svc frontend-production -n "${NAMESPACE}" >/dev/null 2>&1; then
+            PREVIOUS_SLOT="$(kubectl get svc frontend-production \
+              -n "${NAMESPACE}" \
+              -o jsonpath='{.spec.selector.slot}')"
+          else
+            PREVIOUS_SLOT=""
+            kubectl apply -f kubernetes/production-service.yaml
+          fi
+
+          echo "PREVIOUS_SLOT=${PREVIOUS_SLOT}" >> "$GITHUB_ENV"
+
+          kubectl set selector svc frontend-production \
+            "app=frontend,slot=${TARGET_ENV}" \
+            -n "${NAMESPACE}"
+
+          echo "switched=true" >> "$GITHUB_OUTPUT"
+
+          echo "Production selector switched to ${TARGET_ENV}."
+          kubectl get svc frontend-production -n "${NAMESPACE}" -o wide
+
+          kubectl wait --for=jsonpath='{.subsets[0].addresses[0].ip}' \
+            "endpoints/frontend-production" \
+            -n "${NAMESPACE}" \
+            --timeout=60s || true
+
+      - name: Post-switch production smoke test
+        if: steps.decide.outputs.switch == 'true'
+        run: |
+          for i in $(seq 1 36); do
+            FRONTEND_IP="$(kubectl get svc frontend-production \
+              -n "${NAMESPACE}" \
+              -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+
+            if [ -n "${FRONTEND_IP}" ]; then
+              echo "FRONTEND_IP=${FRONTEND_IP}" >> "$GITHUB_ENV"
+              break
+            fi
+
+            echo "Waiting for production LoadBalancer IP..."
+            sleep 5
+          done
+
+          if [ -z "${FRONTEND_IP}" ]; then
+            echo "Unable to find production LoadBalancer IP."
+            exit 1
+          fi
+
+          BODY="$(curl -sf --retry 12 --retry-delay 5 --retry-all-errors "http://${FRONTEND_IP}/")"
+          echo "${BODY}" | grep -q "KoalaTech University"
+
+          echo "Production smoke test passed at http://${FRONTEND_IP}/"
+
+      - name: Rollback production traffic
+        if: failure() && steps.switch.outputs.switched == 'true'
+        run: |
+          if [ -z "${PREVIOUS_SLOT}" ]; then
+            echo "No previous production slot is available to roll back to."
+            exit 1
+          fi
+
+          echo "Production smoke test failed. Rolling back to ${PREVIOUS_SLOT}."
+
+          kubectl set selector svc frontend-production \
+            "app=frontend,slot=${PREVIOUS_SLOT}" \
+            -n "${NAMESPACE}"
+
+          kubectl get svc frontend-production -n "${NAMESPACE}" -o wide
+          echo "Rollback complete. Production traffic points to ${PREVIOUS_SLOT}."
+
+      - name: Show production resources
+        if: always()
+        run: |
+          kubectl get deployments,pods,svc,jobs -n "${NAMESPACE}"
+          echo "Active production slot:"
+          kubectl get svc frontend-production \
+            -n "${NAMESPACE}" \
+            -o jsonpath='{.spec.selector.slot}{"\n"}' || true

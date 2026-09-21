@@ -1,0 +1,55 @@
+name: 01 - CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    name: Unit test / lint / validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Run frontend unit tests
+        working-directory: frontend
+        run: npm run test:run
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Validate Kubernetes manifests
+        run: |
+          kubectl apply --dry-run=client -f kubernetes/
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Validate Terraform
+        working-directory: terraform
+        env:
+          ARM_SUBSCRIPTION_ID: "00000000-0000-0000-0000-000000000000"
+        run: |
+          terraform init -backend=false
+          terraform validate

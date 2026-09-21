@@ -1,0 +1,18 @@
+# Public production entry point. The LoadBalancer IP stays stable because
+# this Service is created once and later updates only change spec.selector.
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-production
+  namespace: production
+  labels:
+    app: frontend
+    role: production
+spec:
+  type: LoadBalancer
+  selector:
+    app: frontend
+    slot: blue
+  ports:
+    - port: 80
+      targetPort: 80
