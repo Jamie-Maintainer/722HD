@@ -113,7 +113,7 @@ Create a `production` environment. The Blue/Green workflow uses it.
 
 ### Workflow 1: CI
 
-**Trigger:** pull request to `main`
+**Trigger:** push to `main`, or pull request targeting `main`
 
 Steps:
 

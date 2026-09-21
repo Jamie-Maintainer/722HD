@@ -1,6 +1,9 @@
 name: 01 - CI
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
