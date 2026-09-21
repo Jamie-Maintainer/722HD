@@ -29,8 +29,8 @@ jobs:
     name: Deploy ${{ inputs.target_env }}
     runs-on: ubuntu-latest
 
-    environment:
-      name: production
+    # environment:
+    #   name: production
 
     env:
       TARGET_ENV: ${{ inputs.target_env }}
