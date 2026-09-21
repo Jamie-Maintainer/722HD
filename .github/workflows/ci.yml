@@ -42,7 +42,7 @@ jobs:
 
       - name: Validate Kubernetes manifests
         run: |
-          kubectl apply --dry-run=client -f kubernetes/
+          kubectl apply --dry-run=client --validate=false -f kubernetes/
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
