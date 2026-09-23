@@ -193,7 +193,8 @@ jobs:
 
           BODY="$(curl -sf --retry 12 --retry-delay 5 --retry-all-errors "http://${FRONTEND_IP}/")"
           echo "${BODY}" | grep -q "KoalaTech University"
-
+          echo "Forcing failure to test rollback"
+          exit 1
           echo "Production smoke test passed at http://${FRONTEND_IP}/"
 
       - name: Rollback production traffic
