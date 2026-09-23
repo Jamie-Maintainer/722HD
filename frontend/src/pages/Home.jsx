@@ -55,7 +55,7 @@ const Home = () => {
       <AppBar position="static">
         <Toolbar>
           <Typography variant="h6" fontWeight={600}>
-            KoalaTech University
+            KoalaTech University(v2)
           </Typography>
         </Toolbar>
       </AppBar>
